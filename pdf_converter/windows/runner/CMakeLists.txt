@@ -32,8 +32,14 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
-target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
-target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app "dwmapi.lib" "ole32.lib" "shell32.lib" "comdlg32.lib")
+
+# Link appropriate C/C++ runtime libraries based on build type
+target_link_libraries(${BINARY_NAME} PRIVATE
+  $<$<CONFIG:Debug>:ucrtd>
+  $<$<CONFIG:Debug>:vcruntimed>
+  # Add other necessary libraries here
+)
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
