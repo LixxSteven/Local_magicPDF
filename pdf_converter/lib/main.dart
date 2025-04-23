@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:path/path.dart' as path;
-// import 'package:path_provider/path_provider.dart'; // Removed unused import
-// import 'package:url_launcher/url_launcher.dart'; // 暂时注释掉，如果需要打开文件再启用
 import 'dart:io';
 import 'services/mineru_service.dart';
 
@@ -51,30 +48,63 @@ class PdfConverterPage extends StatefulWidget {
 
 class _PdfConverterPageState extends State<PdfConverterPage> {
   final MineruService _mineruService = MineruService();
-  File? _selectedFile;
   String? _selectedOutputDir;
-  // ConversionType _conversionType = ConversionType.markdown; // 默认且唯一选项
   bool _isConverting = false;
-  String? _conversionResultPreview; // 用于显示部分结果
   String? _errorMessage;
   String? _statusMessage;
   final List<ConversionHistoryItem> _history = [];
+  List<File> _selectedFiles = [];
+  final Map<String, double> _fileProgress = {};
+  final Map<String, String?> _fileStatus = {};
+  final Map<String, String?> _filePreview = {};
+  final Map<String, int> _estimatedTimes = {}; // 存储每个文件的预估转换时间（秒）
+  final Map<String, DateTime> _startTimes = {}; // 存储每个文件开始转换的时间
 
-  // 选择PDF文件
-  Future<void> _pickFile() async {
+  // 启动MinerU服务
+  Future<void> _startMineruService() async {
+    setState(() {
+      _statusMessage = 'MinerU服务启动中...';
+    });
+    
+    final result = await _mineruService.startMineruService();
+    
+    setState(() {
+      if (result) {
+        _statusMessage = 'MinerU服务已成功启动';
+      } else {
+        _errorMessage = 'MinerU服务启动失败';
+      }
+    });
+  }
+
+  // 选择输出目录
+  Future<void> _pickOutputDirectory() async {
+    String? selectedDir = await FilePicker.platform.getDirectoryPath();
+    if (selectedDir != null) {
+      setState(() {
+        _selectedOutputDir = selectedDir;
+        _errorMessage = null;
+        _statusMessage = '已选择输出目录: ${path.basename(selectedDir)}';
+      });
+    }
+  }
+
+  // 批量选择PDF文件
+  Future<void> _pickFiles() async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
+        allowMultiple: true,
       );
-
       if (result != null) {
         setState(() {
-          _selectedFile = File(result.files.single.path!);
-          _conversionResultPreview = null;
+          _selectedFiles = result.paths.whereType<String>().map((p) => File(p)).toList();
+          _fileProgress.clear();
+          _fileStatus.clear();
+          _filePreview.clear();
           _errorMessage = null;
-          _statusMessage = '已选择文件: ${path.basename(_selectedFile!.path)}';
-          // _outputPath = null; // 输出路径由用户选择或默认
+          _statusMessage = '已选择${_selectedFiles.length}个文件';
         });
       } else {
         setState(() {
@@ -89,32 +119,11 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
     }
   }
 
-  // 选择输出目录
-  Future<void> _pickOutputDirectory() async {
-    try {
-      String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
 
-      if (selectedDirectory != null) {
-        setState(() {
-          _selectedOutputDir = selectedDirectory;
-          _statusMessage = '输出目录已选择: $_selectedOutputDir';
-        });
-      } else {
-         setState(() {
-          _statusMessage = '未选择输出目录';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = '选择输出目录时出错: $e';
-         _statusMessage = null;
-      });
-    }
-  }
 
-  // 转换PDF文件
-  Future<void> _convertFile() async {
-    if (_selectedFile == null) {
+  // 批量转换PDF文件
+  Future<void> _convertFiles() async {
+    if (_selectedFiles.isEmpty) {
       setState(() {
         _errorMessage = '请先选择PDF文件';
       });
@@ -126,247 +135,229 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
       });
       return;
     }
-
     setState(() {
       _isConverting = true;
       _errorMessage = null;
-      _conversionResultPreview = null;
-      _statusMessage = '正在转换...';
+      _statusMessage = '正在批量转换...';
     });
-
-    try {
-      // 获取文件扩展名 (固定为md)
-      const String extension = 'md';
-
-      // 转换文件 (固定为Markdown)
-      final result = await _mineruService.convertPdf(_selectedFile!, ConversionType.markdown);
-
-      // 确定输出文件路径
-      final fileName = path.basenameWithoutExtension(_selectedFile!.path);
-      final outputFile = File(path.join(_selectedOutputDir!, '$fileName.$extension'));
-
-      // 保存结果
-      await _mineruService.saveConversionResult(result, outputFile.path);
-
-      // 更新历史记录
-      final historyItem = ConversionHistoryItem(
-        inputPath: _selectedFile!.path,
-        outputPath: outputFile.path,
-        timestamp: DateTime.now(),
-      );
-
+    for (int i = 0; i < _selectedFiles.length; i++) {
+      final file = _selectedFiles[i];
       setState(() {
-        _conversionResultPreview = result.length > 500 ? '${result.substring(0, 500)}...' : result; // 显示部分预览
-        _statusMessage = '转换完成，文件已保存至: ${outputFile.path}';
-        _history.insert(0, historyItem); // 添加到历史记录顶部
-        // _outputPath = outputFile.path; // 不再需要单独存储，从历史记录获取
+        _fileStatus[file.path] = '转换中';
+        _startTimes[file.path] = DateTime.now(); // 记录开始时间
       });
-
-    } catch (e) {
-      setState(() {
-        _errorMessage = '转换过程中出错: $e';
-        _statusMessage = '转换失败';
-      });
-    } finally {
-      setState(() {
-        _isConverting = false;
-      });
+      try {
+        // 获取预估转换时间
+        final fileSize = await file.length();
+        final estimatedTimeInSeconds = (fileSize / 1024 / 1024 * 2).round(); // 假设每MB需要2秒钟
+        setState(() {
+          _estimatedTimes[file.path] = estimatedTimeInSeconds;
+        });
+        
+        final result = await _mineruService.convertPdf(file, ConversionType.markdown, (currentPage, totalPages) {
+          setState(() {
+            _fileProgress[file.path] = totalPages > 0 ? currentPage / totalPages : 0.0;
+          });
+        });
+        final fileName = path.basenameWithoutExtension(file.path);
+        final outputFile = File(path.join(_selectedOutputDir!, '$fileName.md'));
+        await _mineruService.saveConversionResult(result, outputFile.path);
+        setState(() {
+          _fileStatus[file.path] = '转换完成';
+          _filePreview[file.path] = result.length > 500 ? '${result.substring(0, 500)}...' : result;
+          _history.insert(0, ConversionHistoryItem(
+            inputPath: file.path,
+            outputPath: outputFile.path,
+            timestamp: DateTime.now(),
+          ));
+        });
+      } catch (e) {
+        setState(() {
+          _fileStatus[file.path] = '转换失败: $e';
+        });
+      }
     }
+    setState(() {
+      _isConverting = false;
+      _statusMessage = '批量转换完成';
+    });
   }
 
-  // // 打开转换后的文件 (暂时禁用，如果需要可以取消注释并添加url_launcher依赖)
-  // Future<void> _openOutputFile(String outputPath) async {
-  //   if (outputPath.isNotEmpty) {
-  //     final uri = Uri.file(outputPath);
-  //     try {
-  //       if (await canLaunchUrl(uri)) {
-  //         await launchUrl(uri);
-  //       } else {
-  //         setState(() {
-  //           _errorMessage = '无法打开文件: $outputPath';
-  //         });
-  //       }
-  //     } catch (e) {
-  //        setState(() {
-  //           _errorMessage = '打开文件时出错: $e';
-  //         });
-  //     }
-  //   }
-  // }
+  Widget _buildBatchFileList() {
+    return Expanded(
+      child: ListView.builder(
+        itemCount: _selectedFiles.length,
+        itemBuilder: (context, index) {
+          final file = _selectedFiles[index];
+          final progress = _fileProgress[file.path] ?? 0.0;
+          final status = _fileStatus[file.path] ?? '';
+          return Card(
+            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            child: ListTile(
+              leading: Icon(Icons.picture_as_pdf, color: Colors.red),
+              title: Text(path.basename(file.path)),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(value: progress),
+                  Row(
+                    children: [
+                      Text('状态: $status'),
+                      if (progress > 0 && progress < 1)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: Text('进度: ${(progress * 100).toStringAsFixed(1)}%'),
+                        ),
+                    ],
+                  ),
+                  // 显示预估时间信息
+                  if (_estimatedTimes.containsKey(file.path) && progress > 0 && progress < 1) 
+                    Row(
+                      children: [
+                        Icon(Icons.timer, size: 14),
+                        SizedBox(width: 4),
+                        Text('预估总时间: ${_estimatedTimes[file.path]}秒'),
+                        SizedBox(width: 8),
+                        if (_startTimes.containsKey(file.path)) 
+                          Text('已用时间: ${DateTime.now().difference(_startTimes[file.path]!).inSeconds}秒'),
+                        SizedBox(width: 8),
+                        if (progress > 0)
+                          Text('预计剩余: ${((1 - progress) * _estimatedTimes[file.path]!).round()}秒'),
+                      ],
+                    ),
+                ],
+              ),
+              trailing: IconButton(
+                icon: Icon(Icons.compare_arrows),
+                tooltip: '对比原文与转换后',
+                onPressed: _filePreview[file.path] != null
+                    ? () {
+                        showDialog(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: Text('对比: ${path.basename(file.path)}'),
+                            content: SizedBox(
+                              width: 800,
+                              height: 500,
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text('原文（PDF预览）', style: TextStyle(fontWeight: FontWeight.bold)),
+                                        Expanded(
+                                          child: SingleChildScrollView(
+                                            child: Text('（此处可集成PDF预览控件）'),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  VerticalDivider(),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text('转换后（Markdown预览）', style: TextStyle(fontWeight: FontWeight.bold)),
+                                        Expanded(
+                                          child: SingleChildScrollView(
+                                            child: Text(_filePreview[file.path] ?? ''),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                child: Text('关闭'),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+                    : null,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        elevation: 0,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      body: Container(
+        color: Colors.grey[50],
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch, // 让子项水平填充
           children: [
-            // --- 文件选择与输出目录 --- 
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '1. 选择文件和输出目录',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Row(
+                children: [
+                  ElevatedButton.icon(
+                    icon: Icon(Icons.upload_file),
+                    label: Text('批量选择PDF'),
+                    onPressed: _isConverting ? null : _pickFiles,
+                  ),
+                  SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    icon: Icon(Icons.folder_open),
+                    label: Text('选择输出目录'),
+                    onPressed: _isConverting ? null : _pickOutputDirectory,
+                  ),
+                  SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    icon: Icon(Icons.play_arrow),
+                    label: Text('批量转换'),
+                    onPressed: _isConverting ? null : _convertFiles,
+                  ),
+                  SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    icon: Icon(Icons.power_settings_new),
+                    label: Text('启动MinerU服务'),
+                    onPressed: _startMineruService,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
                     ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: _pickFile,
-                          icon: const Icon(Icons.file_upload_outlined),
-                          label: const Text('选择PDF'),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Text(
-                            _selectedFile != null
-                                ? path.basename(_selectedFile!.path)
-                                : '未选择文件',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                     Row(
-                      children: [
-                        ElevatedButton.icon(
-                          onPressed: _pickOutputDirectory,
-                          icon: const Icon(Icons.folder_open_outlined),
-                          label: const Text('选择输出目录'),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Text(
-                            _selectedOutputDir ?? '未选择输出目录',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                  ),
+                  SizedBox(width: 12),
+                  if (_statusMessage != null)
+                    Text(_statusMessage!, style: TextStyle(color: Colors.blue)),
+                ],
               ),
             ),
-            const SizedBox(height: 16),
-
-            // --- 转换操作 --- 
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                     const Text(
-                      '2. 开始转换 (PDF -> Markdown)',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                    Center( // 将按钮和加载指示器居中
-                      child: _isConverting
-                          ? const SpinKitFadingCircle( // 使用加载动画
-                              color: Colors.blue,
-                              size: 50.0,
-                            )
-                          : ElevatedButton.icon(
-                              onPressed: (_selectedFile != null && _selectedOutputDir != null) ? _convertFile : null, // 仅在选择文件和目录后启用
-                              icon: const Icon(Icons.sync_alt),
-                              label: const Text('开始转换'),
-                              style: ElevatedButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-                                textStyle: const TextStyle(fontSize: 16)
-                              ),
-                            ),
-                    ),
-                    const SizedBox(height: 10),
-                    // 显示状态或错误信息
-                    if (_statusMessage != null)
-                      Text(_statusMessage!, style: TextStyle(color: _errorMessage != null ? Colors.red : Colors.green)),
-                    if (_errorMessage != null)
-                      Text(_errorMessage!, style: const TextStyle(color: Colors.red)),
-                  ],
-                ),
+            _buildBatchFileList(),
+            if (_errorMessage != null)
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Text(_errorMessage!, style: TextStyle(color: Colors.red)),
               ),
-            ),
-            const SizedBox(height: 16),
-
-            // --- 结果预览 (可选) ---
-            if (_conversionResultPreview != null)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '转换结果预览 (部分)',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        height: 100, // 限制预览区域高度
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: SingleChildScrollView(
-                          child: Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Text(_conversionResultPreview!),
-                          ),
-                        ),
-                      ),
-                    ],
+            Expanded(
+              child: ListView(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text('转换历史', style: TextStyle(fontWeight: FontWeight.bold)),
                   ),
-                ),
-              ),
-            const SizedBox(height: 16),
-
-            // --- 转换历史 --- 
-            Expanded( // 让历史记录列表填充剩余空间
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '转换历史',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: _history.isEmpty
-                            ? const Center(child: Text('暂无历史记录'))
-                            : ListView.builder(
-                                itemCount: _history.length,
-                                itemBuilder: (context, index) {
-                                  final item = _history[index];
-                                  return ListTile(
-                                    leading: const Icon(Icons.history),
-                                    title: Text('输入: ${path.basename(item.inputPath)}'),
-                                    subtitle: Text('输出: ${item.outputPath}\n时间: ${item.timestamp.toLocal()}'),
-                                    isThreeLine: true,
-                                    // trailing: IconButton( // 如果需要打开文件，可以添加按钮
-                                    //   icon: const Icon(Icons.open_in_new),
-                                    //   onPressed: () => _openOutputFile(item.outputPath),
-                                    // ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
+                  ..._history.map((item) => ListTile(
+                        leading: Icon(Icons.history),
+                        title: Text(path.basename(item.inputPath)),
+                        subtitle: Text('输出: ${item.outputPath}\n时间: ${item.timestamp}'),
+                      )),
+                ],
               ),
             ),
           ],
