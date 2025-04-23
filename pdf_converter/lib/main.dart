@@ -47,6 +47,89 @@ class PdfConverterPage extends StatefulWidget {
 }
 
 class _PdfConverterPageState extends State<PdfConverterPage> {
+  // MinerU服务状态
+  bool _isServiceRunning = false;
+  
+  @override
+  void initState() {
+    super.initState();
+    // 应用启动时检查服务状态
+    _checkServiceStatus();
+  }
+  
+  // 检查MinerU服务状态
+  Future<void> _checkServiceStatus() async {
+    final isAvailable = await _mineruService.checkServiceAvailability();
+    setState(() {
+      _isServiceRunning = isAvailable;
+    });
+  }
+  
+  // 显示MinerU服务配置帮助对话框
+  void _showMineruSetupHelp() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.help_outline, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('MinerU服务配置指南'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('MinerU服务需要正确配置Conda环境才能运行。请按照以下步骤进行配置：', 
+                style: TextStyle(fontWeight: FontWeight.bold)),
+              SizedBox(height: 16),
+              Text('1. 安装Conda环境', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('   - 下载并安装Miniconda或Anaconda'),
+              Text('   - 确保conda命令可在命令行中使用'),
+              SizedBox(height: 12),
+              Text('2. 创建MinerU专用环境', style: TextStyle(fontWeight: FontWeight.bold)),
+              Container(
+                padding: EdgeInsets.all(8),
+                color: Colors.grey.shade100,
+                child: SelectableText('conda create -n mineru_env python=3.9'),
+              ),
+              SizedBox(height: 12),
+              Text('3. 激活环境并安装依赖', style: TextStyle(fontWeight: FontWeight.bold)),
+              Container(
+                padding: EdgeInsets.all(8),
+                color: Colors.grey.shade100,
+                child: SelectableText(
+                  'conda activate mineru_env\n'
+                  'pip install uvicorn fastapi python-multipart\n'
+                  'pip install mineru  # 或按MinerU官方文档安装'
+                ),
+              ),
+              SizedBox(height: 12),
+              Text('4. 确认MinerU安装位置', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('   - 默认路径: MinerU\\MinerU\\projects\\web_api'),
+              Text('   - 如需修改路径，请编辑应用程序配置文件'),
+              SizedBox(height: 12),
+              Text('5. 常见问题排查', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('   • "Process is detached"错误: conda环境未正确激活'),
+              Text('   • 端口占用: 确保8888端口未被其他应用占用'),
+              Text('   • 路径错误: 确认MinerU安装路径是否正确'),
+              SizedBox(height: 16),
+              Text('更多信息请参考MinerU官方文档。', style: TextStyle(fontStyle: FontStyle.italic)),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+  
   final MineruService _mineruService = MineruService();
   String? _selectedOutputDir;
   bool _isConverting = false;
@@ -64,17 +147,41 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
   Future<void> _startMineruService() async {
     setState(() {
       _statusMessage = 'MinerU服务启动中...';
+      _errorMessage = null; // 清除之前的错误信息
     });
     
-    final result = await _mineruService.startMineruService();
+    final result = await _mineruService.startMineruService(
+      onError: (String errorMsg) {
+        setState(() {
+          // 显示详细错误信息
+          _errorMessage = '启动MinerU服务失败: $errorMsg';
+          _isServiceRunning = false; // 更新服务状态
+        });
+      }
+    );
+    
+    // 更新服务状态
+    await _checkServiceStatus();
     
     setState(() {
       if (result) {
         _statusMessage = 'MinerU服务已成功启动';
+        _errorMessage = null;
       } else {
-        _errorMessage = 'MinerU服务启动失败';
+        // 如果onError回调没有设置错误信息，则显示一般性错误
+        _errorMessage ??= 'MinerU服务启动失败，请检查conda环境配置和MinerU安装';
       }
     });
+    
+    // 启动定期检查服务状态的定时器
+    if (result) {
+      // 每30秒检查一次服务状态
+      Future.delayed(Duration(seconds: 30), () {
+        if (mounted) {
+          _checkServiceStatus();
+        }
+      });
+    }
   }
 
   // 选择输出目录
@@ -334,6 +441,37 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
                     ),
                   ),
                   SizedBox(width: 12),
+                  // 服务状态指示器
+                  Container(
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: _isServiceRunning ? Colors.green.shade50 : Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: _isServiceRunning ? Colors.green.shade200 : Colors.red.shade200,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isServiceRunning ? Icons.check_circle : Icons.error_outline,
+                          color: _isServiceRunning ? Colors.green : Colors.red,
+                          size: 16,
+                        ),
+                        SizedBox(width: 6),
+                        Text(
+                          _isServiceRunning ? 'MinerU服务运行中' : 'MinerU服务未运行',
+                          style: TextStyle(
+                            color: _isServiceRunning ? Colors.green.shade700 : Colors.red.shade700,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(width: 12),
                   if (_statusMessage != null)
                     Text(_statusMessage!, style: TextStyle(color: Colors.blue)),
                 ],
@@ -341,9 +479,35 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
             ),
             _buildBatchFileList(),
             if (_errorMessage != null)
-              Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Text(_errorMessage!, style: TextStyle(color: Colors.red)),
+              Container(
+                margin: const EdgeInsets.all(8.0),
+                padding: const EdgeInsets.all(12.0),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  border: Border.all(color: Colors.red.shade200),
+                  borderRadius: BorderRadius.circular(8.0),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.error_outline, color: Colors.red),
+                        SizedBox(width: 8),
+                        Text('错误信息', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                        Spacer(),
+                        if (_errorMessage != null && _errorMessage!.contains('MinerU服务'))
+                          TextButton.icon(
+                            icon: Icon(Icons.help_outline),
+                            label: Text('配置帮助'),
+                            onPressed: _showMineruSetupHelp,
+                          ),
+                      ],
+                    ),
+                    SizedBox(height: 8),
+                    Text(_errorMessage!, style: TextStyle(color: Colors.red.shade800)),
+                  ],
+                ),
               ),
             Expanded(
               child: ListView(

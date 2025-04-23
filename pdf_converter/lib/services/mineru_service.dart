@@ -213,7 +213,8 @@ class MineruService {
   
   /// 启动MinerU服务
   /// 返回值: 成功启动返回true，失败返回false
-  Future<bool> startMineruService() async {
+  /// 错误信息: 通过errorMessage参数返回详细错误信息
+  Future<bool> startMineruService({Function(String)? onError}) async {
     try {
       // 检查服务是否已经在运行
       if (await checkServiceAvailability()) {
@@ -226,27 +227,74 @@ class MineruService {
           ? 'MinerU\\MinerU\\projects\\web_api'
           : 'MinerU/MinerU/projects/web_api';
       
-      // 构建启动命令
+      // 构建启动命令，包含conda环境激活
       final String command = Platform.isWindows
           ? 'powershell'
           : 'bash';
       
+      // 使用conda激活环境后启动服务
       final List<String> arguments = Platform.isWindows
-          ? ['-Command', 'cd $mineruPath && uvicorn app:app --host 0.0.0.0 --port 8888']
-          : ['-c', 'cd $mineruPath && uvicorn app:app --host 0.0.0.0 --port 8888'];
+          ? [
+              '-Command', 
+              '''
+              try {
+                # 激活conda环境
+                conda activate mineru_env 2>&1
+                if ($?) {
+                  # 切换到MinerU目录并启动服务
+                  cd $mineruPath
+                  if ($?) {
+                    # 启动服务
+                    uvicorn app:app --host 0.0.0.0 --port 8888
+                  } else {
+                    Write-Error "无法切换到MinerU目录，请确保MinerU已正确安装"
+                    exit 1
+                  }
+                } else {
+                  Write-Error "无法激活conda环境'mineru_env'，请确保已正确安装并配置conda环境"
+                  exit 1
+                }
+              } catch {
+                Write-Error "启动MinerU服务时出错: $($_.Exception.Message)"
+                exit 1
+              }
+              '''
+            ]
+          : [
+              '-c', 
+              '''
+              # 激活conda环境
+              source $(conda info --base)/etc/profile.d/conda.sh && \
+              conda activate mineru_env && \
+              cd $mineruPath && \
+              uvicorn app:app --host 0.0.0.0 --port 8888
+              '''
+            ];
       
-      // 启动进程
+      // 启动进程，使用inheritStdio模式以便捕获输出
       final process = await Process.start(
         command,
         arguments,
-        mode: ProcessStartMode.detached,
+        mode: ProcessStartMode.inheritStdio,
       );
       
-      // 分离进程，让它在后台运行
-      process.exitCode.then((_) => Logger.i('MinerU服务已退出'));
+      // 收集错误输出
+      List<String> errorLines = [];
+      process.stderr.transform(utf8.decoder).listen((data) {
+        errorLines.add(data);
+        Logger.e('MinerU服务错误: $data');
+        if (onError != null) {
+          onError(data);
+        }
+      });
+      
+      // 收集标准输出以便调试
+      process.stdout.transform(utf8.decoder).listen((data) {
+        Logger.i('MinerU服务输出: $data');
+      });
       
       // 等待服务启动
-      for (int i = 0; i < 5; i++) {
+      for (int i = 0; i < 10; i++) { // 增加等待时间
         await Future.delayed(Duration(seconds: 2));
         if (await checkServiceAvailability()) {
           Logger.i('MinerU服务已成功启动');
@@ -254,10 +302,36 @@ class MineruService {
         }
       }
       
-      Logger.w('MinerU服务启动超时');
+      // 如果超时，尝试终止进程
+      try {
+        process.kill();
+      } catch (e) {
+        Logger.w('无法终止MinerU进程: $e');
+      }
+      
+      // 返回详细错误信息
+      final errorMsg = '服务启动超时。可能原因：\n'
+          '1. conda环境未正确配置\n'
+          '2. MinerU服务路径不正确\n'
+          '3. 端口8888已被占用\n'
+          '详细错误: ${errorLines.join('\n')}';
+      
+      Logger.w(errorMsg);
+      if (onError != null) {
+        onError(errorMsg);
+      }
       return false;
     } catch (e) {
-      Logger.e('启动MinerU服务时出错: $e');
+      final errorMsg = '启动MinerU服务时出错: $e\n'
+          '可能原因：\n'
+          '1. 系统缺少必要组件(如conda、Python)\n'
+          '2. MinerU服务未正确安装\n'
+          '3. 权限不足，无法启动服务';
+      
+      Logger.e(errorMsg);
+      if (onError != null) {
+        onError(errorMsg);
+      }
       return false;
     }
   }
