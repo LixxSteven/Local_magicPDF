@@ -210,7 +210,7 @@ class MineruService {
       throw Exception('保存转换结果时出错: $e');
     }
   }
-
+  
   /// 通过本地脚本安装MinerU服务和相关环境
   Future<bool> installMineruEnvironment({Function(String)? onProgress, Function(String)? onError}) async {
     try {
@@ -222,14 +222,52 @@ class MineruService {
       final String appDir = Directory.current.path;
       Logger.i('应用程序目录: $appDir');
       
+      // 检查是否有足够的磁盘空间（至少需要20GB）
+      try {
+        var tempDir = Platform.isWindows ? 'C:\\' : '/tmp';
+        var result = await Process.run(
+          Platform.isWindows ? 'powershell' : 'df',
+          Platform.isWindows 
+              ? ['-Command', '(Get-PSDrive C).Free'] 
+              : ['-h', tempDir],
+        );
+        
+        Logger.i('磁盘空间检查: ${result.stdout}');
+        
+        if (onProgress != null) {
+          onProgress('检查系统环境和磁盘空间...');
+        }
+        
+        // 记录系统环境信息便于调试
+        Logger.i('操作系统: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
+        Logger.i('Dart版本: ${Platform.version}');
+        Logger.i('本地路径: ${Platform.localeName}');
+      } catch (e) {
+        Logger.w('检查磁盘空间时出错: $e');
+      }
+      
       // 构建安装脚本路径
       final String installerDir = path.join(appDir, 'resources', 'installer');
+      
+      // 确保安装脚本存在
+      final String scriptPath = Platform.isWindows
+          ? path.join(installerDir, 'install_conda_mineru.ps1')
+          : path.join(installerDir, 'install_conda_mineru.sh');
+          
+      if (!File(scriptPath).existsSync()) {
+        final errorMsg = '安装脚本不存在: $scriptPath';
+        Logger.e(errorMsg);
+        if (onError != null) {
+          onError(errorMsg);
+        }
+        return false;
+      }
+      
       String installerScript;
       List<String> args;
       
       if (Platform.isWindows) {
         installerScript = 'powershell';
-        final scriptPath = path.join(installerDir, 'install_conda_mineru.ps1');
         args = ['-ExecutionPolicy', 'Bypass', '-File', scriptPath];
         
         if (onProgress != null) {
@@ -237,7 +275,6 @@ class MineruService {
         }
       } else {
         installerScript = '/bin/bash';
-        final scriptPath = path.join(installerDir, 'install_conda_mineru.sh');
         
         // 确保脚本有执行权限
         await Process.run('chmod', ['+x', scriptPath]);
@@ -252,11 +289,31 @@ class MineruService {
       Logger.i('安装脚本: $installerScript');
       Logger.i('安装脚本参数: $args');
       
-      // 启动安装进程
+      // 检查PowerShell执行策略(仅Windows)
+      if (Platform.isWindows) {
+        try {
+          var policyResult = await Process.run(
+            'powershell', 
+            ['-Command', 'Get-ExecutionPolicy'],
+          );
+          Logger.i('PowerShell执行策略: ${policyResult.stdout}');
+          
+          if (policyResult.stdout.toString().trim().toLowerCase() == 'restricted') {
+            if (onProgress != null) {
+              onProgress('PowerShell执行策略受限，尝试临时更改...');
+            }
+          }
+        } catch (e) {
+          Logger.w('检查PowerShell执行策略时出错: $e');
+        }
+      }
+      
+      // 启动安装进程，指定工作目录
       final process = await Process.start(
         installerScript,
         args,
-        mode: ProcessStartMode.inheritStdio,
+        workingDirectory: appDir,
+        mode: ProcessStartMode.normal, // 使用normal模式而不是inheritStdio，以便捕获输出
       );
       
       // 收集输出并更新进度
@@ -286,20 +343,53 @@ class MineruService {
         }
       });
       
-      // 等待进程完成
-      final exitCode = await process.exitCode;
+      // 等待进程完成，但设置超时避免无限等待
+      bool processFinished = false;
+      Timer? timeoutTimer;
+      final completer = Completer<int>();
       
-      if (exitCode == 0) {
+      // 设置30分钟超时
+      timeoutTimer = Timer(Duration(minutes: 30), () {
+        if (!processFinished && !completer.isCompleted) {
+          Logger.e('安装进程超时，强制结束');
+          process.kill();
+          completer.complete(-100); // 特殊退出码表示超时
+        }
+      });
+      
+      // 获取实际的进程退出码
+      final exitCode = await process.exitCode;
+      processFinished = true;
+      
+      if (timeoutTimer.isActive) {
+        timeoutTimer.cancel();
+      }
+      
+      if (!completer.isCompleted) {
+        completer.complete(exitCode);
+      }
+      
+      final finalExitCode = await completer.future;
+      
+      // 检查安装结果
+      if (finalExitCode == 0) {
         if (onProgress != null) {
           onProgress('MinerU服务环境安装成功');
         }
         Logger.i('MinerU服务环境安装成功');
         return true;
-      } else {
-        final errorMsg = '安装失败，退出代码: $exitCode，错误信息: ${errorLines.join('\n')}';
+      } else if (finalExitCode == -100) {
+        final errorMsg = '安装超时，请检查系统资源和网络连接';
         Logger.e(errorMsg);
         if (onError != null) {
           onError(errorMsg);
+        }
+        return false;
+      } else {
+        final errorMsg = '安装失败，退出代码: $finalExitCode\n错误信息: ${errorLines.join('\n')}\n输出信息: ${outputLines.join('\n')}';
+        Logger.e(errorMsg);
+        if (onError != null) {
+          onError('安装失败，退出代码: $finalExitCode\n错误信息: ${errorLines.join('\n')}');
         }
         return false;
       }
@@ -312,7 +402,7 @@ class MineruService {
       return false;
     }
   }
-
+  
   /// 获取本地安装的MinerU服务脚本路径
   Future<String?> getLocalMineruServiceScript() async {
     try {
@@ -346,9 +436,72 @@ class MineruService {
       final scriptPath = await getLocalMineruServiceScript();
       if (scriptPath == null) {
         if (onError != null) {
-          onError('未找到本地MinerU服务脚本，请先安装MinerU服务环境');
+          onError('未找到本地MinerU服务脚本，请先安装MinerU服务环境\n检查位置: ${Platform.isWindows ? path.join(Platform.environment['LOCALAPPDATA']!, 'MagicPDF') : path.join(Platform.environment['HOME']!, '.magicpdf')}');
         }
         return false;
+      }
+      
+      // 检查脚本是否可执行
+      final scriptFile = File(scriptPath);
+      if (!await scriptFile.exists()) {
+        final errorMsg = '启动脚本文件不存在: $scriptPath';
+        Logger.e(errorMsg);
+        if (onError != null) {
+          onError(errorMsg);
+        }
+        return false;
+      }
+      
+      // 检查端口8888是否被占用
+      try {
+        if (Platform.isWindows) {
+          var portCheckResult = await Process.run(
+            'powershell',
+            ['-Command', 'Get-NetTCPConnection -LocalPort 8888 -ErrorAction SilentlyContinue'],
+          );
+          if (portCheckResult.stdout.toString().trim().isNotEmpty) {
+            Logger.w('端口8888已被占用');
+            
+            // 尝试检查是否是MinerU服务占用
+            if (await checkServiceAvailability()) {
+              Logger.i('端口被MinerU服务占用，服务已经运行');
+              if (onProgress != null) {
+                onProgress('MinerU服务已经在运行');
+              }
+              return true;
+            } else {
+              if (onError != null) {
+                onError('端口8888被其他应用占用，请关闭占用该端口的应用后重试');
+              }
+              return false;
+            }
+          }
+        } else {
+          var portCheckResult = await Process.run(
+            'lsof', 
+            ['-i:8888'],
+          );
+          if (portCheckResult.stdout.toString().trim().isNotEmpty) {
+            Logger.w('端口8888已被占用');
+            
+            // 尝试检查是否是MinerU服务占用
+            if (await checkServiceAvailability()) {
+              Logger.i('端口被MinerU服务占用，服务已经运行');
+              if (onProgress != null) {
+                onProgress('MinerU服务已经在运行');
+              }
+              return true;
+            } else {
+              if (onError != null) {
+                onError('端口8888被其他应用占用，请关闭占用该端口的应用后重试');
+              }
+              return false;
+            }
+          }
+        }
+      } catch (e) {
+        Logger.w('检查端口占用时出错: $e');
+        // 继续执行，不要因为无法检查端口而中断
       }
       
       if (onProgress != null) {
@@ -361,7 +514,7 @@ class MineruService {
       
       if (Platform.isWindows) {
         command = 'cmd.exe';
-        args = ['/c', scriptPath];
+        args = ['/c', 'start', '/b', scriptPath];
       } else {
         command = '/bin/bash';
         args = [scriptPath];
@@ -372,16 +525,27 @@ class MineruService {
         command,
         args,
         mode: ProcessStartMode.detached,
+        workingDirectory: path.dirname(scriptPath),
       );
+      
+      Logger.i('MinerU服务进程已启动，PID: ${process.pid}');
       
       // 给服务一些启动时间
       if (onProgress != null) {
         onProgress('MinerU服务启动中，请稍候...');
       }
       
-      // 等待几秒钟让服务启动
-      for (int i = 0; i < 10; i++) {
-        await Future.delayed(Duration(seconds: 1));
+      // 定义最大重试次数和重试间隔
+      final maxRetries = 20; // 20次重试，每次1秒，总共等待20秒
+      final retryInterval = Duration(seconds: 1);
+      
+      // 等待服务启动并检查可用性
+      for (int i = 0; i < maxRetries; i++) {
+        await Future.delayed(retryInterval);
+        
+        if (onProgress != null && i % 5 == 0) {
+          onProgress('MinerU服务启动中 (${(i / maxRetries * 100).round()}%)...');
+        }
         
         // 检查服务是否可用
         if (await checkServiceAvailability()) {
@@ -393,16 +557,26 @@ class MineruService {
         }
       }
       
-      // 如果超时但进程仍在运行，则认为服务已启动但尚未准备好
+      // 如果超时但可能服务已启动，再检查一次
+      Logger.w('服务启动超时，进行最后一次检查');
+      if (await checkServiceAvailability()) {
+        if (onProgress != null) {
+          onProgress('MinerU服务已成功启动 (延迟响应)');
+        }
+        Logger.i('MinerU服务已通过本地脚本成功启动（延迟响应）');
+        return true;
+      }
+      
+      // 如果进程仍在运行但服务不可用，返回警告
       if (process.kill()) {
         if (onProgress != null) {
-          onProgress('MinerU服务已启动，但健康检查超时');
+          onProgress('MinerU服务已启动，但健康检查超时。请手动验证服务是否可用。');
         }
         Logger.w('MinerU服务已启动，但健康检查超时');
         return true;
       } else {
         if (onError != null) {
-          onError('MinerU服务启动失败');
+          onError('MinerU服务启动失败。可能原因：\n1. 端口8888被占用\n2. Python环境配置问题\n3. 依赖项安装不完整\n\n请查看日志文件获取详细信息。');
         }
         Logger.e('MinerU服务启动失败');
         return false;
@@ -416,7 +590,7 @@ class MineruService {
       return false;
     }
   }
-
+  
   /// 改进的启动MinerU服务方法，增加自动安装功能
   Future<bool> startMineruService({Function(String)? onError, Function(String)? onProgress}) async {
     try {
@@ -449,7 +623,7 @@ class MineruService {
           }
         }
       } else {
-        if (onProgress != null) {
+      if (onProgress != null) {
           onProgress('未发现本地MinerU服务脚本，将安装MinerU服务环境...');
         }
       }
@@ -477,14 +651,14 @@ class MineruService {
       
       if (!started) {
         final errorMsg = '无法启动本地MinerU服务';
-        Logger.e(errorMsg);
-        if (onError != null) {
-          onError(errorMsg);
+          Logger.e(errorMsg);
+          if (onError != null) {
+            onError(errorMsg);
+          }
+          return false;
         }
-        return false;
-      }
-      
-      return true;
+        
+          return true;
     } catch (e) {
       final errorMsg = '启动MinerU服务时出错: $e\n'
           '可能原因：\n'

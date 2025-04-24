@@ -2,23 +2,90 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as path;
 import 'dart:io';
+import 'dart:async';
 import 'services/mineru_service.dart';
 import 'utils/logger.dart';
 
 void main() async {
-  // 确保Flutter绑定初始化
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  // 初始化日志系统
-  await Logger.init(
-    level: LogLevel.debug,
-    enableFileLogging: true,
-    logDir: path.join(Directory.current.path, 'logs'),
-  );
-  
-  Logger.i('应用启动');
-  
-  runApp(const MyApp());
+  // 捕获未处理的异常，防止应用崩溃
+  runZonedGuarded(() async {
+    try {
+      // 确保Flutter绑定初始化
+      WidgetsFlutterBinding.ensureInitialized();
+      
+      // 初始化日志系统
+      await Logger.init(
+        level: LogLevel.debug,
+        enableFileLogging: true,
+        logDir: path.join(Directory.current.path, 'logs'),
+      );
+      
+      Logger.i('应用启动');
+      
+      // 设置错误处理
+      FlutterError.onError = (FlutterErrorDetails details) {
+        Logger.e('Flutter错误: ${details.exception}');
+        Logger.e('堆栈跟踪: ${details.stack}');
+        FlutterError.presentError(details);
+      };
+      
+      runApp(const MyApp());
+    } catch (e, stackTrace) {
+      Logger.e('启动时发生错误: $e');
+      Logger.e('$stackTrace');
+      
+      // 尝试初始化简单日志
+      try {
+        final logDir = path.join(Directory.current.path, 'logs');
+        await Directory(logDir).create(recursive: true);
+        final logFile = File(path.join(logDir, 'crash_${DateTime.now().millisecondsSinceEpoch}.log'));
+        await logFile.writeAsString('启动时发生错误: $e\n$stackTrace');
+      } catch (_) {
+        // 忽略日志错误
+      }
+      
+      // 显示错误UI
+      runApp(MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error_outline, color: Colors.red, size: 64),
+                  SizedBox(height: 16),
+                  Text('应用启动时发生错误', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                  SizedBox(height: 8),
+                  Text('$e', style: TextStyle(color: Colors.red)),
+                  SizedBox(height: 16),
+                  Text('请尝试以管理员身份重新启动应用', style: TextStyle(fontSize: 16)),
+                  SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: () => exit(0),
+                    child: Text('关闭应用'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ));
+    }
+  }, (error, stackTrace) {
+    // 处理未捕获的异步错误
+    Logger.e('未捕获的错误: $error');
+    Logger.e('$stackTrace');
+    
+    // 尝试记录到文件
+    try {
+      final logDir = path.join(Directory.current.path, 'logs');
+      final logFile = File(path.join(logDir, 'uncaught_${DateTime.now().millisecondsSinceEpoch}.log'));
+      logFile.writeAsStringSync('未捕获的错误: $error\n$stackTrace');
+    } catch (_) {
+      // 忽略日志错误
+    }
+  });
 }
 
 class MyApp extends StatelessWidget {
@@ -236,181 +303,334 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
   
   // 启动MinerU服务
   Future<void> _startMineruService() async {
-    // 显示进度对话框
-    showDialog(
-      context: context,
-      barrierDismissible: false, // 用户不能通过点击外部关闭对话框
-      builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: Row(
-                children: [
-                  Icon(Icons.settings, color: Colors.blue),
-                  SizedBox(width: 10),
-                  Text('MinerU服务配置与启动'),
-                ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  LinearProgressIndicator(),
-                  SizedBox(height: 20),
-                  Text('正在启动MinerU服务...', style: TextStyle(fontWeight: FontWeight.bold)),
-                  SizedBox(height: 10),
-                  Container(
-                    height: 150,
-                    width: 400,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[100],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.grey[300]!),
-                    ),
-                    padding: EdgeInsets.all(8),
-                    child: SingleChildScrollView(
-                      child: Text(_statusMessage ?? '准备启动MinerU服务...'),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                  },
-                  child: Text('取消'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    setState(() {
-      _statusMessage = '正在启动MinerU服务...';
-      _errorMessage = null; // 清除之前的错误信息
-    });
-    
-    // 使用修改后的startMineruService方法，添加进度回调
-    final result = await _mineruService.startMineruService(
-      onError: (String errorMsg) {
-        setState(() {
-          // 显示详细错误信息
-          _errorMessage = '启动MinerU服务失败: $errorMsg';
-          _isServiceRunning = false; // 更新服务状态
-        });
-        // 关闭进度对话框
-        if (mounted) {
-          Navigator.of(context, rootNavigator: true).pop();
-          
-          // 显示错误对话框
-          showDialog(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: Row(
-                children: [
-                  Icon(Icons.error_outline, color: Colors.red),
-                  SizedBox(width: 10),
-                  Text('MinerU服务启动失败'),
-                ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('启动MinerU服务时遇到以下错误：', style: TextStyle(fontWeight: FontWeight.bold)),
-                  SizedBox(height: 10),
-                  Container(
-                    height: 200,
-                    width: 400,
-                    decoration: BoxDecoration(
-                      color: Colors.red[50],
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.red[200]!),
-                    ),
-                    padding: EdgeInsets.all(8),
-                    child: SingleChildScrollView(
-                      child: Text(errorMsg, style: TextStyle(color: Colors.red[800])),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                  },
-                  child: Text('关闭'),
-                ),
-                TextButton(
-                  onPressed: _showMineruSetupHelp,
-                  child: Text('查看配置指南'),
-                ),
-              ],
-            ),
-          );
-        }
-      },
-      onProgress: (String progressMsg) {
-        setState(() {
-          _statusMessage = progressMsg;
-        });
-      }
-    );
-    
-    // 更新服务状态
-    await _checkServiceStatus();
-    
-    // 关闭进度对话框
-    if (mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-      
-      setState(() {
-        if (result) {
-          _statusMessage = 'MinerU服务已成功启动';
-          _errorMessage = null;
-          
-          // 显示成功对话框
-          if (mounted) {
-            showDialog(
-              context: context,
-              builder: (context) => AlertDialog(
+    try {
+      // 显示进度对话框
+      showDialog(
+        context: context,
+        barrierDismissible: false, // 用户不能通过点击外部关闭对话框
+        builder: (BuildContext context) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return AlertDialog(
                 title: Row(
                   children: [
-                    Icon(Icons.check_circle, color: Colors.green),
+                    Icon(Icons.settings, color: Colors.blue),
                     SizedBox(width: 10),
-                    Text('MinerU服务启动成功'),
+                    Text('MinerU服务配置与启动'),
                   ],
                 ),
-                content: Text('MinerU服务已成功启动，现在您可以开始转换PDF文件了。'),
+                content: SizedBox(
+                  width: 500,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      LinearProgressIndicator(
+                        backgroundColor: Colors.grey[200],
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                      ),
+                      SizedBox(height: 20),
+                      Text('正在启动MinerU服务...', style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 10),
+                      Container(
+                        height: 150,
+                        width: 400,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[100],
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.grey[300]!),
+                        ),
+                        padding: EdgeInsets.all(8),
+                        child: SingleChildScrollView(
+                          child: Text(_statusMessage ?? '准备启动MinerU服务...'),
+                        ),
+                      ),
+                      SizedBox(height: 10),
+                      ExpansionTile(
+                        title: Text('环境配置清单', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                        children: [
+                          Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.blue[50],
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('基础环境:', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('• Python 3.9 (Conda环境)'),
+                                SizedBox(height: 8),
+                                Text('核心依赖:', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('• API服务: uvicorn, fastapi, python-multipart'),
+                                Text('• PDF解析: PyMuPDF, pdfminer.six'),
+                                Text('• 语言检测: fast-langdetect'),
+                                Text('• 工具库: numpy, boto3, loguru'),
+                                Text('• 机器学习: torch, torchvision, transformers'),
+                                SizedBox(height: 8),
+                                Text('系统要求:', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('• Windows 10/11'),
+                                Text('• 至少16GB内存（推荐32GB）'),
+                                Text('• 至少20GB可用磁盘空间'),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 10),
+                      ExpansionTile(
+                        title: Text('安装进度参考', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                        children: [
+                          Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.green[50],
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('1. 创建应用程序数据目录 (✓)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('创建应用程序数据目录') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('2. 检查Conda是否已安装 (✓)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('检测到现有Conda安装') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('3. 下载并安装Miniconda (可能需要几分钟)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('Miniconda安装成功') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('4. 创建MinerU环境 (Python 3.9)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('MinerU环境创建成功') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('5. 安装基础依赖 (可能需要几分钟)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('正在安装PDF解析所需的高级依赖') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('6. 安装PDF解析高级依赖 (可能需要10-20分钟)', style: TextStyle(
+                                  decoration: _statusMessage?.contains('MinerU依赖安装成功') == true 
+                                      ? TextDecoration.lineThrough : TextDecoration.none
+                                )),
+                                Text('7. 配置MinerU源代码'),
+                                Text('8. 创建启动脚本'),
+                                Text('9. 启动MinerU服务'),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
                 actions: [
                   TextButton(
                     onPressed: () {
                       Navigator.of(context).pop();
                     },
-                    child: Text('确定'),
+                    child: Text('取消'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+
+      setState(() {
+        _statusMessage = '正在启动MinerU服务...';
+        _errorMessage = null; // 清除之前的错误信息
+      });
+      
+      // 使用修改后的startMineruService方法，添加进度回调
+      final result = await _mineruService.startMineruService(
+        onError: (String errorMsg) {
+          setState(() {
+            // 显示详细错误信息
+            _errorMessage = '启动MinerU服务失败: $errorMsg';
+            _isServiceRunning = false; // 更新服务状态
+          });
+          // 关闭进度对话框
+          if (mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+            
+            // 显示错误对话框
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Row(
+                  children: [
+                    Icon(Icons.error_outline, color: Colors.red),
+                    SizedBox(width: 10),
+                    Text('MinerU服务启动失败'),
+                  ],
+                ),
+                content: SizedBox(
+                  width: 500,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('启动MinerU服务时遇到以下错误：', style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 10),
+                      Container(
+                        height: 200,
+                        width: 480,
+                        decoration: BoxDecoration(
+                          color: Colors.red[50],
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.red[200]!),
+                        ),
+                        padding: EdgeInsets.all(8),
+                        child: SingleChildScrollView(
+                          child: Text(errorMsg, style: TextStyle(color: Colors.red[800])),
+                        ),
+                      ),
+                      SizedBox(height: 10),
+                      ExpansionTile(
+                        title: Text('常见问题解决方案', style: TextStyle(fontWeight: FontWeight.bold)),
+                        children: [
+                          Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.amber[50],
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.amber[200]!),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('1. 以管理员身份运行', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('   右键点击应用图标，选择"以管理员身份运行"'),
+                                SizedBox(height: 5),
+                                Text('2. 检查网络连接', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('   安装过程需要从互联网下载组件'),
+                                SizedBox(height: 5),
+                                Text('3. 检查磁盘空间', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('   确保C盘至少有20GB可用空间'),
+                                SizedBox(height: 5),
+                                Text('4. 暂时禁用杀毒软件', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('   部分杀毒软件可能阻止安装过程'),
+                                SizedBox(height: 5),
+                                Text('5. 检查路径中是否有特殊字符', style: TextStyle(fontWeight: FontWeight.bold)),
+                                Text('   应用路径中应避免中文或特殊字符'),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                    child: Text('关闭'),
+                  ),
+                  TextButton(
+                    onPressed: _showMineruSetupHelp,
+                    child: Text('查看配置指南'),
                   ),
                 ],
               ),
             );
           }
-        } else {
-          // 如果onError回调没有设置错误信息，则显示一般性错误
-          _errorMessage ??= 'MinerU服务启动失败，请检查conda环境配置和MinerU安装';
+        },
+        onProgress: (String progressMsg) {
+          if (mounted) {
+            setState(() {
+              _statusMessage = progressMsg;
+            });
+          }
         }
-      });
-    }
-    
-    // 启动定期检查服务状态的定时器
-    if (result) {
-      // 每30秒检查一次服务状态
-      Future.delayed(Duration(seconds: 30), () {
-        if (mounted) {
-          _checkServiceStatus();
-        }
-      });
+      );
+      
+      // 更新服务状态
+      await _checkServiceStatus();
+      
+      // 关闭进度对话框
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        
+        setState(() {
+          if (result) {
+            _statusMessage = 'MinerU服务已成功启动';
+            _errorMessage = null;
+            
+            // 显示成功对话框
+            if (mounted) {
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: Row(
+                    children: [
+                      Icon(Icons.check_circle, color: Colors.green),
+                      SizedBox(width: 10),
+                      Text('MinerU服务启动成功'),
+                    ],
+                  ),
+                  content: Text('MinerU服务已成功启动，现在您可以开始转换PDF文件了。'),
+                  actions: [
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                      child: Text('确定'),
+                    ),
+                  ],
+                ),
+              );
+            }
+          } else {
+            // 如果onError回调没有设置错误信息，则显示一般性错误
+            _errorMessage ??= 'MinerU服务启动失败，请检查conda环境配置和MinerU安装';
+          }
+        });
+      }
+      
+      // 启动定期检查服务状态的定时器
+      if (result) {
+        // 每30秒检查一次服务状态
+        Future.delayed(Duration(seconds: 30), () {
+          if (mounted) {
+            _checkServiceStatus();
+          }
+        });
+      }
+    } catch (e) {
+      // 处理UI异常，防止黑屏
+      Logger.e('UI异常: $e');
+      if (mounted) {
+        // 关闭可能打开的对话框
+        Navigator.of(context, rootNavigator: true).pop();
+        
+        // 显示友好的错误信息
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.error_outline, color: Colors.red),
+                SizedBox(width: 10),
+                Text('应用发生错误'),
+              ],
+            ),
+            content: Text('应用发生未知错误: $e\n\n请尝试重启应用'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+                child: Text('确定'),
+              ),
+            ],
+          ),
+        );
+      }
     }
   }
 
