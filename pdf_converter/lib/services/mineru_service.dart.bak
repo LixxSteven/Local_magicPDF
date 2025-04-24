@@ -210,214 +210,114 @@ class MineruService {
       throw Exception('保存转换结果时出错: $e');
     }
   }
-
-  /// 通过本地脚本安装MinerU服务和相关环境
-  Future<bool> installMineruEnvironment({Function(String)? onProgress, Function(String)? onError}) async {
+  
+  /// 检查conda环境是否已安装
+  Future<bool> _isCondaInstalled() async {
+    try {
+      final command = Platform.isWindows ? 'where' : 'which';
+      final args = Platform.isWindows ? ['conda'] : ['conda'];
+      
+      final result = await Process.run(command, args);
+      return result.exitCode == 0;
+    } catch (e) {
+      Logger.e('检查conda安装时出错: $e');
+      return false;
+    }
+  }
+  
+  /// 检查指定的conda环境是否存在
+  Future<bool> _doesCondaEnvExist(String envName) async {
+    try {
+      final command = Platform.isWindows ? 'powershell' : 'bash';
+      final args = Platform.isWindows 
+          ? ['-Command', 'conda env list | findstr "$envName"'] 
+          : ['-c', 'conda env list | grep "$envName"'];
+      
+      final result = await Process.run(command, args);
+      return result.exitCode == 0;
+    } catch (e) {
+      Logger.e('检查conda环境时出错: $e');
+      return false;
+    }
+  }
+  
+  /// 创建conda环境
+  Future<bool> _createCondaEnv(String envName, {Function(String)? onProgress}) async {
     try {
       if (onProgress != null) {
-        onProgress('正在准备安装MinerU服务环境...');
+        onProgress('正在创建conda环境: $envName...');
       }
       
-      // 获取应用程序根目录
-      final String appDir = Directory.current.path;
-      Logger.i('应用程序目录: $appDir');
+      final command = Platform.isWindows ? 'powershell' : 'bash';
+      final args = Platform.isWindows
+          ? ['-Command', 'conda create -n $envName python=3.9 -y']
+          : ['-c', 'conda create -n $envName python=3.9 -y'];
       
-      // 构建安装脚本路径
-      final String installerDir = path.join(appDir, 'resources', 'installer');
-      String installerScript;
-      List<String> args;
+      final result = await Process.run(command, args);
       
-      if (Platform.isWindows) {
-        installerScript = 'powershell';
-        final scriptPath = path.join(installerDir, 'install_conda_mineru.ps1');
-        args = ['-ExecutionPolicy', 'Bypass', '-File', scriptPath];
-        
+      if (result.exitCode == 0) {
         if (onProgress != null) {
-          onProgress('正在使用Windows PowerShell脚本安装...');
+          onProgress('conda环境创建成功');
         }
-      } else {
-        installerScript = '/bin/bash';
-        final scriptPath = path.join(installerDir, 'install_conda_mineru.sh');
-        
-        // 确保脚本有执行权限
-        await Process.run('chmod', ['+x', scriptPath]);
-        args = [scriptPath];
-        
-        if (onProgress != null) {
-          onProgress('正在使用Bash脚本安装...');
-        }
-      }
-      
-      // 记录重要信息
-      Logger.i('安装脚本: $installerScript');
-      Logger.i('安装脚本参数: $args');
-      
-      // 启动安装进程
-      final process = await Process.start(
-        installerScript,
-        args,
-        mode: ProcessStartMode.inheritStdio,
-      );
-      
-      // 收集输出并更新进度
-      List<String> outputLines = [];
-      process.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-        outputLines.add(line);
-        Logger.i('安装输出: $line');
-        
-        if (onProgress != null) {
-          // 提取关键进度信息
-          if (line.contains('下载') || line.contains('安装') || 
-              line.contains('创建') || line.contains('设置') || 
-              line.contains('启动')) {
-            onProgress(line);
-          }
-        }
-      });
-      
-      // 收集错误输出
-      List<String> errorLines = [];
-      process.stderr.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-        errorLines.add(line);
-        Logger.e('安装错误: $line');
-        
-        if (onError != null) {
-          onError(line);
-        }
-      });
-      
-      // 等待进程完成
-      final exitCode = await process.exitCode;
-      
-      if (exitCode == 0) {
-        if (onProgress != null) {
-          onProgress('MinerU服务环境安装成功');
-        }
-        Logger.i('MinerU服务环境安装成功');
         return true;
       } else {
-        final errorMsg = '安装失败，退出代码: $exitCode，错误信息: ${errorLines.join('\n')}';
-        Logger.e(errorMsg);
-        if (onError != null) {
-          onError(errorMsg);
+        if (onProgress != null) {
+          onProgress('创建conda环境失败: ${result.stderr}');
         }
         return false;
       }
     } catch (e) {
-      final errorMsg = '安装MinerU服务环境时出错: $e';
-      Logger.e(errorMsg);
-      if (onError != null) {
-        onError(errorMsg);
+      Logger.e('创建conda环境时出错: $e');
+      if (onProgress != null) {
+        onProgress('创建conda环境时出错: $e');
       }
       return false;
     }
   }
-
-  /// 获取本地安装的MinerU服务脚本路径
-  Future<String?> getLocalMineruServiceScript() async {
+  
+  /// 安装MinerU依赖
+  Future<bool> _installMineruDependencies(String envName, {Function(String)? onProgress}) async {
     try {
-      final String localAppDataPath = Platform.isWindows 
-          ? path.join(Platform.environment['LOCALAPPDATA']!, 'MagicPDF')
-          : path.join(Platform.environment['HOME']!, '.magicpdf');
-      
-      final String scriptName = Platform.isWindows 
-          ? 'start_mineru_service.bat' 
-          : 'start_mineru_service.sh';
-      
-      final String scriptPath = path.join(localAppDataPath, scriptName);
-      
-      if (await File(scriptPath).exists()) {
-        Logger.i('找到本地MinerU服务脚本: $scriptPath');
-        return scriptPath;
-      } else {
-        Logger.w('本地MinerU服务脚本不存在: $scriptPath');
-        return null;
-      }
-    } catch (e) {
-      Logger.e('获取本地MinerU服务脚本路径时出错: $e');
-      return null;
-    }
-  }
-
-  /// 启动本地安装的MinerU服务
-  Future<bool> startLocalMineruService({Function(String)? onProgress, Function(String)? onError}) async {
-    try {
-      // 获取本地服务脚本路径
-      final scriptPath = await getLocalMineruServiceScript();
-      if (scriptPath == null) {
-        if (onError != null) {
-          onError('未找到本地MinerU服务脚本，请先安装MinerU服务环境');
-        }
-        return false;
-      }
-      
       if (onProgress != null) {
-        onProgress('正在通过本地脚本启动MinerU服务...');
+        onProgress('正在安装MinerU依赖...');
       }
       
-      // 构建启动命令
-      String command;
-      List<String> args;
+      final command = Platform.isWindows ? 'powershell' : 'bash';
+      final activateCmd = Platform.isWindows
+          ? 'conda activate $envName'
+          : 'source $(conda info --base)/etc/profile.d/conda.sh && conda activate $envName';
       
-      if (Platform.isWindows) {
-        command = 'cmd.exe';
-        args = ['/c', scriptPath];
-      } else {
-        command = '/bin/bash';
-        args = [scriptPath];
-      }
+      final installCmd = '$activateCmd && pip install uvicorn fastapi python-multipart mineru';
       
-      // 启动服务进程
-      final process = await Process.start(
-        command,
-        args,
-        mode: ProcessStartMode.detached,
-      );
+      final args = Platform.isWindows
+          ? ['-Command', installCmd]
+          : ['-c', installCmd];
       
-      // 给服务一些启动时间
-      if (onProgress != null) {
-        onProgress('MinerU服务启动中，请稍候...');
-      }
+      final result = await Process.run(command, args);
       
-      // 等待几秒钟让服务启动
-      for (int i = 0; i < 10; i++) {
-        await Future.delayed(Duration(seconds: 1));
-        
-        // 检查服务是否可用
-        if (await checkServiceAvailability()) {
-          if (onProgress != null) {
-            onProgress('MinerU服务已成功启动');
-          }
-          Logger.i('MinerU服务已通过本地脚本成功启动');
-          return true;
-        }
-      }
-      
-      // 如果超时但进程仍在运行，则认为服务已启动但尚未准备好
-      if (process.kill()) {
+      if (result.exitCode == 0) {
         if (onProgress != null) {
-          onProgress('MinerU服务已启动，但健康检查超时');
+          onProgress('MinerU依赖安装成功');
         }
-        Logger.w('MinerU服务已启动，但健康检查超时');
         return true;
       } else {
-        if (onError != null) {
-          onError('MinerU服务启动失败');
+        if (onProgress != null) {
+          onProgress('安装MinerU依赖失败: ${result.stderr}');
         }
-        Logger.e('MinerU服务启动失败');
         return false;
       }
     } catch (e) {
-      final errorMsg = '启动本地MinerU服务时出错: $e';
-      Logger.e(errorMsg);
-      if (onError != null) {
-        onError(errorMsg);
+      Logger.e('安装MinerU依赖时出错: $e');
+      if (onProgress != null) {
+        onProgress('安装MinerU依赖时出错: $e');
       }
       return false;
     }
   }
-
-  /// 改进的启动MinerU服务方法，增加自动安装功能
+  
+  /// 启动MinerU服务
+  /// 返回值: 成功启动返回true，失败返回false
+  /// 错误信息: 通过errorMessage参数返回详细错误信息
   Future<bool> startMineruService({Function(String)? onError, Function(String)? onProgress}) async {
     try {
       // 检查服务是否已经在运行
@@ -429,66 +329,177 @@ class MineruService {
         return true;
       }
       
-      // 尝试通过本地脚本启动服务
-      final String? scriptPath = await getLocalMineruServiceScript();
-      if (scriptPath != null) {
+      // 检查conda是否已安装
+      if (onProgress != null) {
+        onProgress('检查conda安装状态...');
+      }
+      
+      final isCondaInstalled = await _isCondaInstalled();
+      if (!isCondaInstalled) {
+        final errorMsg = 'conda未安装，无法启动MinerU服务。\n'
+            '请先安装Miniconda或Anaconda，并确保conda命令可用。';
+        Logger.e(errorMsg);
+        if (onError != null) {
+          onError(errorMsg);
+        }
+        return false;
+      }
+      
+      // 检查mineru_env环境是否存在
+      const String envName = 'mineru_env';
+      if (onProgress != null) {
+        onProgress('检查conda环境: $envName...');
+      }
+      
+      final envExists = await _doesCondaEnvExist(envName);
+      if (!envExists) {
         if (onProgress != null) {
-          onProgress('发现本地MinerU服务脚本，尝试启动...');
+          onProgress('conda环境 $envName 不存在，正在尝试自动创建...');
         }
         
-        final started = await startLocalMineruService(
-          onProgress: onProgress,
-          onError: onError
-        );
-        
-        if (started) {
-          return true;
-        } else {
-          if (onProgress != null) {
-            onProgress('通过本地脚本启动失败，尝试安装MinerU服务环境...');
+        // 创建环境
+        final created = await _createCondaEnv(envName, onProgress: onProgress);
+        if (!created) {
+          final errorMsg = '无法创建conda环境: $envName\n'
+              '请手动创建环境: conda create -n $envName python=3.9 -y';
+          Logger.e(errorMsg);
+          if (onError != null) {
+            onError(errorMsg);
           }
+          return false;
         }
-      } else {
-        if (onProgress != null) {
-          onProgress('未发现本地MinerU服务脚本，将安装MinerU服务环境...');
+        
+        // 安装依赖
+        final installed = await _installMineruDependencies(envName, onProgress: onProgress);
+        if (!installed) {
+          final errorMsg = '无法安装MinerU依赖\n'
+              '请手动安装依赖:\n'
+              'conda activate $envName\n'
+              'pip install uvicorn fastapi python-multipart mineru';
+          Logger.e(errorMsg);
+          if (onError != null) {
+            onError(errorMsg);
+          }
+          return false;
         }
       }
       
-      // 安装MinerU服务环境
-      final installed = await installMineruEnvironment(
-        onProgress: onProgress,
-        onError: onError
+      // 获取MinerU服务路径 - 假设在项目根目录的MinerU文件夹中
+      final String mineruPath = Platform.isWindows
+          ? 'MinerU\\MinerU\\projects\\web_api'
+          : 'MinerU/MinerU/projects/web_api';
+      
+      if (onProgress != null) {
+        onProgress('正在启动MinerU服务...');
+      }
+      
+      // 构建启动命令，包含conda环境激活
+      final String command = Platform.isWindows
+          ? 'powershell'
+          : 'bash';
+      
+      // 使用conda激活环境后启动服务
+      final List<String> arguments = Platform.isWindows
+          ? [
+              '-Command', 
+              '''
+              try {
+                # 激活conda环境
+                conda activate $envName 2>&1
+                if (\$?) {
+                  # 切换到MinerU目录并启动服务
+                  cd "$mineruPath"
+                  if (\$?) {
+                    # 启动服务
+                    uvicorn app:app --host 0.0.0.0 --port 8888
+                  } else {
+                    Write-Error "无法切换到MinerU目录，请确保MinerU已正确安装"
+                    exit 1
+                  }
+                } else {
+                  Write-Error "无法激活conda环境'$envName'，请确保已正确安装并配置conda环境"
+                  exit 1
+                }
+              } catch {
+                Write-Error "启动MinerU服务时出错: \$(\$_.Exception.Message)"
+                exit 1
+              }
+              '''
+            ]
+          : [
+              '-c', 
+              '''
+              # 激活conda环境
+              source \$(conda info --base)/etc/profile.d/conda.sh && 
+              conda activate $envName && 
+              cd "$mineruPath" && 
+              uvicorn app:app --host 0.0.0.0 --port 8888
+              '''
+            ];
+      
+      // 启动进程，使用inheritStdio模式以便捕获输出
+      final process = await Process.start(
+        command,
+        arguments,
+        mode: ProcessStartMode.inheritStdio,
       );
       
-      if (!installed) {
-        final errorMsg = '无法安装MinerU服务环境';
-        Logger.e(errorMsg);
+      // 收集错误输出
+      List<String> errorLines = [];
+      process.stderr.transform(utf8.decoder).listen((data) {
+        errorLines.add(data);
+        Logger.e('MinerU服务错误: $data');
         if (onError != null) {
-          onError(errorMsg);
+          onError(data);
         }
-        return false;
+      });
+      
+      // 收集标准输出以便调试
+      process.stdout.transform(utf8.decoder).listen((data) {
+        Logger.i('MinerU服务输出: $data');
+        if (onProgress != null && data.contains('Application startup complete')) {
+          onProgress('MinerU服务启动成功');
+        }
+      });
+      
+      // 等待服务启动
+      for (int i = 0; i < 15; i++) { // 增加等待时间
+        if (onProgress != null && i > 0 && i % 3 == 0) {
+          onProgress('等待MinerU服务启动... ${i*2}秒');
+        }
+        await Future.delayed(Duration(seconds: 2));
+        if (await checkServiceAvailability()) {
+          Logger.i('MinerU服务已成功启动');
+          if (onProgress != null) {
+            onProgress('MinerU服务已成功启动');
+          }
+          return true;
+        }
       }
       
-      // 安装成功后启动服务
-      final started = await startLocalMineruService(
-        onProgress: onProgress,
-        onError: onError
-      );
-      
-      if (!started) {
-        final errorMsg = '无法启动本地MinerU服务';
-        Logger.e(errorMsg);
-        if (onError != null) {
-          onError(errorMsg);
-        }
-        return false;
+      // 如果超时，尝试终止进程
+      try {
+        process.kill();
+      } catch (e) {
+        Logger.w('无法终止MinerU进程: $e');
       }
       
-      return true;
+      // 返回详细错误信息
+      final errorMsg = '服务启动超时。可能原因：\n'
+          '1. conda环境未正确配置\n'
+          '2. MinerU服务路径不正确\n'
+          '3. 端口8888已被占用\n'
+          '详细错误: ${errorLines.join('\n')}';
+      
+      Logger.w(errorMsg);
+      if (onError != null) {
+        onError(errorMsg);
+      }
+      return false;
     } catch (e) {
       final errorMsg = '启动MinerU服务时出错: $e\n'
           '可能原因：\n'
-          '1. 系统缺少必要组件\n'
+          '1. 系统缺少必要组件(如conda、Python)\n'
           '2. MinerU服务未正确安装\n'
           '3. 权限不足，无法启动服务';
       

@@ -3,8 +3,21 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as path;
 import 'dart:io';
 import 'services/mineru_service.dart';
+import 'utils/logger.dart';
 
-void main() {
+void main() async {
+  // 确保Flutter绑定初始化
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // 初始化日志系统
+  await Logger.init(
+    level: LogLevel.debug,
+    enableFileLogging: true,
+    logDir: path.join(Directory.current.path, 'logs'),
+  );
+  
+  Logger.i('应用启动');
+  
   runApp(const MyApp());
 }
 
@@ -49,12 +62,27 @@ class PdfConverterPage extends StatefulWidget {
 class _PdfConverterPageState extends State<PdfConverterPage> {
   // MinerU服务状态
   bool _isServiceRunning = false;
+  final MineruService _mineruService = MineruService();
+  String? _selectedOutputDir;
+  bool _isConverting = false;
+  String? _errorMessage;
+  String? _statusMessage;
+  final List<ConversionHistoryItem> _history = [];
+  List<File> _selectedFiles = [];
+  final Map<String, double> _fileProgress = {};
+  final Map<String, String?> _fileStatus = {};
+  final Map<String, String?> _filePreview = {};
+  final Map<String, int> _estimatedTimes = {}; // 存储每个文件的预估转换时间（秒）
+  final Map<String, DateTime> _startTimes = {}; // 存储每个文件开始转换的时间
   
   @override
   void initState() {
     super.initState();
     // 应用启动时检查服务状态
     _checkServiceStatus();
+    
+    // 记录当前工作目录，便于调试
+    Logger.i('当前工作目录: ${Directory.current.path}');
   }
   
   // 检查MinerU服务状态
@@ -77,79 +105,195 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
             Text('MinerU服务配置指南'),
           ],
         ),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('MinerU服务需要正确配置Conda环境才能运行。请按照以下步骤进行配置：', 
-                style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 16),
-              Text('1. 安装Conda环境', style: TextStyle(fontWeight: FontWeight.bold)),
-              Text('   - 下载并安装Miniconda或Anaconda'),
-              Text('   - 确保conda命令可在命令行中使用'),
-              SizedBox(height: 12),
-              Text('2. 创建MinerU专用环境', style: TextStyle(fontWeight: FontWeight.bold)),
-              Container(
-                padding: EdgeInsets.all(8),
-                color: Colors.grey.shade100,
-                child: SelectableText('conda create -n mineru_env python=3.9'),
-              ),
-              SizedBox(height: 12),
-              Text('3. 激活环境并安装依赖', style: TextStyle(fontWeight: FontWeight.bold)),
-              Container(
-                padding: EdgeInsets.all(8),
-                color: Colors.grey.shade100,
-                child: SelectableText(
-                  'conda activate mineru_env\n'
-                  'pip install uvicorn fastapi python-multipart\n'
-                  'pip install mineru  # 或按MinerU官方文档安装'
+        content: SizedBox(
+          width: 600,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.blue.shade200),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline, color: Colors.blue),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          '本应用现已支持自动配置MinerU服务环境。点击"启动MinerU服务"按钮即可自动检测和配置所需环境。',
+                          style: TextStyle(fontWeight: FontWeight.bold)
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              SizedBox(height: 12),
-              Text('4. 确认MinerU安装位置', style: TextStyle(fontWeight: FontWeight.bold)),
-              Text('   - 默认路径: MinerU\\MinerU\\projects\\web_api'),
-              Text('   - 如需修改路径，请编辑应用程序配置文件'),
-              SizedBox(height: 12),
-              Text('5. 常见问题排查', style: TextStyle(fontWeight: FontWeight.bold)),
-              Text('   • "Process is detached"错误: conda环境未正确激活'),
-              Text('   • 端口占用: 确保8888端口未被其他应用占用'),
-              Text('   • 路径错误: 确认MinerU安装路径是否正确'),
-              SizedBox(height: 16),
-              Text('更多信息请参考MinerU官方文档。', style: TextStyle(fontStyle: FontStyle.italic)),
-            ],
+                SizedBox(height: 16),
+                _buildSetupStep(
+                  '1',
+                  '安装Conda环境',
+                  [
+                    '• 下载并安装Miniconda或Anaconda',
+                    '• Windows用户: 从官方网站下载安装包并运行',
+                    '• 安装时勾选"添加到PATH"选项',
+                    '• 安装完成后重启终端或命令提示符',
+                    '• 验证安装: 在命令行中输入 conda --version'
+                  ],
+                  'https://docs.conda.io/en/latest/miniconda.html',
+                  '下载Miniconda'
+                ),
+              ],
+            ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('关闭'),
+      ),
+    );
+  }
+  
+  // 构建设置步骤UI组件
+  Widget _buildSetupStep(String stepNumber, String title, List<String> steps, String linkUrl, String linkText) {
+    return Container(
+      margin: EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withAlpha(26),
+            spreadRadius: 1,
+            blurRadius: 3,
+            offset: Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(8),
+                topRight: Radius.circular(8),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: Colors.blue,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: Text(
+                      stepNumber,
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+                SizedBox(width: 12),
+                Text(
+                  title,
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ...steps.map((step) => Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Text(step),
+                    )),
+                SizedBox(height: 8),
+                if (linkUrl.isNotEmpty && linkText.isNotEmpty)
+                  TextButton.icon(
+                    icon: Icon(Icons.open_in_new, size: 16),
+                    label: Text(linkText),
+                    onPressed: () async {
+                      // 这里可以添加打开URL的逻辑
+                      // 例如使用url_launcher包
+                      // await launch(linkUrl);
+                    },
+                  ),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
   
-  final MineruService _mineruService = MineruService();
-  String? _selectedOutputDir;
-  bool _isConverting = false;
-  String? _errorMessage;
-  String? _statusMessage;
-  final List<ConversionHistoryItem> _history = [];
-  List<File> _selectedFiles = [];
-  final Map<String, double> _fileProgress = {};
-  final Map<String, String?> _fileStatus = {};
-  final Map<String, String?> _filePreview = {};
-  final Map<String, int> _estimatedTimes = {}; // 存储每个文件的预估转换时间（秒）
-  final Map<String, DateTime> _startTimes = {}; // 存储每个文件开始转换的时间
-
   // 启动MinerU服务
   Future<void> _startMineruService() async {
+    // 显示进度对话框
+    showDialog(
+      context: context,
+      barrierDismissible: false, // 用户不能通过点击外部关闭对话框
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Row(
+                children: [
+                  Icon(Icons.settings, color: Colors.blue),
+                  SizedBox(width: 10),
+                  Text('MinerU服务配置与启动'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(),
+                  SizedBox(height: 20),
+                  Text('正在启动MinerU服务...', style: TextStyle(fontWeight: FontWeight.bold)),
+                  SizedBox(height: 10),
+                  Container(
+                    height: 150,
+                    width: 400,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[100],
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.grey[300]!),
+                    ),
+                    padding: EdgeInsets.all(8),
+                    child: SingleChildScrollView(
+                      child: Text(_statusMessage ?? '准备启动MinerU服务...'),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                  },
+                  child: Text('取消'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
     setState(() {
-      _statusMessage = 'MinerU服务启动中...';
+      _statusMessage = '正在启动MinerU服务...';
       _errorMessage = null; // 清除之前的错误信息
     });
     
+    // 使用修改后的startMineruService方法，添加进度回调
     final result = await _mineruService.startMineruService(
       onError: (String errorMsg) {
         setState(() {
@@ -157,21 +301,107 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
           _errorMessage = '启动MinerU服务失败: $errorMsg';
           _isServiceRunning = false; // 更新服务状态
         });
+        // 关闭进度对话框
+        if (mounted) {
+          Navigator.of(context, rootNavigator: true).pop();
+          
+          // 显示错误对话框
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Row(
+                children: [
+                  Icon(Icons.error_outline, color: Colors.red),
+                  SizedBox(width: 10),
+                  Text('MinerU服务启动失败'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('启动MinerU服务时遇到以下错误：', style: TextStyle(fontWeight: FontWeight.bold)),
+                  SizedBox(height: 10),
+                  Container(
+                    height: 200,
+                    width: 400,
+                    decoration: BoxDecoration(
+                      color: Colors.red[50],
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.red[200]!),
+                    ),
+                    padding: EdgeInsets.all(8),
+                    child: SingleChildScrollView(
+                      child: Text(errorMsg, style: TextStyle(color: Colors.red[800])),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                  },
+                  child: Text('关闭'),
+                ),
+                TextButton(
+                  onPressed: _showMineruSetupHelp,
+                  child: Text('查看配置指南'),
+                ),
+              ],
+            ),
+          );
+        }
+      },
+      onProgress: (String progressMsg) {
+        setState(() {
+          _statusMessage = progressMsg;
+        });
       }
     );
     
     // 更新服务状态
     await _checkServiceStatus();
     
-    setState(() {
-      if (result) {
-        _statusMessage = 'MinerU服务已成功启动';
-        _errorMessage = null;
-      } else {
-        // 如果onError回调没有设置错误信息，则显示一般性错误
-        _errorMessage ??= 'MinerU服务启动失败，请检查conda环境配置和MinerU安装';
-      }
-    });
+    // 关闭进度对话框
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+      
+      setState(() {
+        if (result) {
+          _statusMessage = 'MinerU服务已成功启动';
+          _errorMessage = null;
+          
+          // 显示成功对话框
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.green),
+                    SizedBox(width: 10),
+                    Text('MinerU服务启动成功'),
+                  ],
+                ),
+                content: Text('MinerU服务已成功启动，现在您可以开始转换PDF文件了。'),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                    child: Text('确定'),
+                  ),
+                ],
+              ),
+            );
+          }
+        } else {
+          // 如果onError回调没有设置错误信息，则显示一般性错误
+          _errorMessage ??= 'MinerU服务启动失败，请检查conda环境配置和MinerU安装';
+        }
+      });
+    }
     
     // 启动定期检查服务状态的定时器
     if (result) {
@@ -225,8 +455,6 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
       });
     }
   }
-
-
 
   // 批量转换PDF文件
   Future<void> _convertFiles() async {
