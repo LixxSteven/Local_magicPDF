@@ -1,56 +1,38 @@
-# MinerU服务启动问题修复记录
+# 修复 mineru_service.dart 中的脚本语法错误
 
 ## 问题描述
 
-用户报告在启动MinerU服务时遇到以下错误：
+在 `mineru_service.dart` 文件中，嵌入的 PowerShell 和 Bash 脚本存在语法错误，主要是变量引用和字符串转义的问题。错误位于以下几个位置：
 
-```
-flutter: [2025-04-23 19:40:50.584] [ERROR] 启动MinerU服务时出错: Bad state: Process is detached 
-flutter: [2025-04-23 19:40:54.562] [ERROR] 启动MinerU服务时出错: Bad state: Process is detached 
-flutter: [2025-04-23 19:41:08.835] [ERROR] 启动MinerU服务时出错: Bad state: Process is detached 
-Lost connection to device. 
-```
-
-用户需要检查MinerU本地服务的启动方式（包括激活conda环境等），并在软件UI中添加详细的错误信息显示。
+1. 第243行：PowerShell 变量 `$?` 需要在 Dart 字符串中正确转义
+2. 第246行：PowerShell 变量 `$?` 需要在 Dart 字符串中正确转义
+3. 第258行：PowerShell 变量 `$_.Exception.Message` 需要在 Dart 字符串中正确转义
+4. 第267行：Bash 命令替换 `$(conda info --base)` 需要在 Dart 字符串中正确转义
+5. 第267-269行：Bash 脚本中不必要的反斜杠转义
 
 ## 解决方案
 
-### 1. 修改MinerU服务启动方法
+### 1. PowerShell 脚本修复
 
-- 添加了conda环境激活支持
-- 改进了错误处理机制
-- 增加了详细的错误信息收集和显示
+在 PowerShell 脚本中，我们需要对特殊变量进行转义，以便 Dart 编译器能够正确解析：
 
-### 2. 改进UI界面
+- `$?` 改为 `\$?`
+- `$($_.Exception.Message)` 改为 `\$(\$_.Exception.Message)`
 
-- 添加了服务状态指示器
-- 增加了详细的错误信息显示区域
-- 添加了MinerU服务配置帮助对话框
+### 2. Bash 脚本修复
 
-### 3. 添加服务状态检测
+在 Bash 脚本中，我们需要：
 
-- 应用启动时自动检查服务状态
-- 服务启动后定期检查服务状态
-- 在UI中实时显示服务运行状态
+- 对命令替换语法进行转义：`$(conda info --base)` 改为 `\$(conda info --base)`
+- 移除不必要的行尾反斜杠 `\`，改为普通的换行符
 
-## 技术细节
+## 修复后的结果
 
-1. 在`MineruService`类中修改了`startMineruService`方法：
-   - 添加了conda环境激活命令
-   - 使用`inheritStdio`模式捕获进程输出
-   - 添加了错误信息回调机制
+修复后，`dart analyze` 命令显示没有任何语法错误，文件可以正常编译。
 
-2. 在UI中添加了服务状态指示器和错误信息显示区域：
-   - 使用颜色区分服务运行状态（绿色表示运行中，红色表示未运行）
-   - 错误信息区域提供详细的错误原因和解决建议
+```
+Analyzing mineru_service.dart...
+No issues found!
+```
 
-3. 添加了MinerU服务配置帮助对话框：
-   - 提供conda环境配置步骤
-   - 提供常见问题排查指南
-   - 包含可复制的命令示例
-
-## 后续建议
-
-1. 考虑添加MinerU服务配置界面，允许用户自定义服务路径和conda环境名称
-2. 添加自动修复功能，尝试自动解决常见的服务启动问题
-3. 实现服务日志查看功能，方便用户排查问题
+这些修复确保了 MinerU 服务可以正常启动，无论是在 Windows 环境（使用 PowerShell）还是在类 Unix 环境（使用 Bash）中。

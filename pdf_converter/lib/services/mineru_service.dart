@@ -240,10 +240,10 @@ class MineruService {
               try {
                 # 激活conda环境
                 conda activate mineru_env 2>&1
-                if ($?) {
+                if (\$?) {
                   # 切换到MinerU目录并启动服务
-                  cd $mineruPath
-                  if ($?) {
+                  cd "$mineruPath"
+                  if (\$?) {
                     # 启动服务
                     uvicorn app:app --host 0.0.0.0 --port 8888
                   } else {
@@ -255,7 +255,7 @@ class MineruService {
                   exit 1
                 }
               } catch {
-                Write-Error "启动MinerU服务时出错: $($_.Exception.Message)"
+                Write-Error "启动MinerU服务时出错: \$(\$_.Exception.Message)"
                 exit 1
               }
               '''
@@ -264,9 +264,9 @@ class MineruService {
               '-c', 
               '''
               # 激活conda环境
-              source $(conda info --base)/etc/profile.d/conda.sh && \
-              conda activate mineru_env && \
-              cd $mineruPath && \
+              source \$(conda info --base)/etc/profile.d/conda.sh && 
+              conda activate mineru_env && 
+              cd "$mineruPath" && 
               uvicorn app:app --host 0.0.0.0 --port 8888
               '''
             ];
