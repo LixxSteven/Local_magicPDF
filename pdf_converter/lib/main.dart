@@ -142,6 +142,14 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
   final Map<String, int> _estimatedTimes = {}; // 存储每个文件的预估转换时间（秒）
   final Map<String, DateTime> _startTimes = {}; // 存储每个文件开始转换的时间
   
+  // --- 新增高级选项状态 ---
+  bool _extractImages = true;
+  bool _preserveLayout = true;
+  String _outputFormat = 'markdown'; // 可选: markdown, html, json
+  bool _detectLanguage = true;
+  bool _supportTables = true;
+  // --- 结束新增 ---
+  
   @override
   void initState() {
     super.initState();
@@ -634,6 +642,59 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
     }
   }
 
+  // --- 新增高级选项UI构建方法 ---
+  Widget _buildAdvancedOptions() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8.0),
+      child: ExpansionTile(
+        title: Text('高级转换选项', style: TextStyle(fontWeight: FontWeight.bold)),
+        initiallyExpanded: false,
+        childrenPadding: EdgeInsets.only(left: 16, right: 16, bottom: 8),
+        children: [
+          SwitchListTile(
+            title: Text('提取图片'),
+            subtitle: Text('从PDF中提取并保存图片到输出目录'),
+            value: _extractImages,
+            onChanged: (value) => setState(() => _extractImages = value),
+          ),
+          SwitchListTile(
+            title: Text('保持原始布局'),
+            subtitle: Text('尝试保持文档原始布局结构'),
+            value: _preserveLayout,
+            onChanged: (value) => setState(() => _preserveLayout = value),
+          ),
+          SwitchListTile(
+            title: Text('表格识别'),
+            subtitle: Text('启用表格识别和转换'),
+            value: _supportTables,
+            onChanged: (value) => setState(() => _supportTables = value),
+          ),
+          ListTile(
+            title: Text('输出格式'),
+            trailing: DropdownButton<String>(
+              value: _outputFormat,
+              items: ['markdown', 'html', 'json'].map((format) => 
+                DropdownMenuItem(value: format, child: Text(format.toUpperCase()))
+              ).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => _outputFormat = value);
+                }
+              },
+            ),
+          ),
+          SwitchListTile(
+            title: Text('语言检测'),
+            subtitle: Text('自动检测文档语言'),
+            value: _detectLanguage,
+            onChanged: (value) => setState(() => _detectLanguage = value),
+          ),
+        ],
+      ),
+    );
+  }
+  // --- 结束新增 ---
+
   // 选择输出目录
   Future<void> _pickOutputDirectory() async {
     String? selectedDir = await FilePicker.platform.getDirectoryPath();
@@ -709,13 +770,27 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
           _estimatedTimes[file.path] = estimatedTimeInSeconds;
         });
         
-        final result = await _mineruService.convertPdf(file, ConversionType.markdown, (currentPage, totalPages) {
-          setState(() {
-            _fileProgress[file.path] = totalPages > 0 ? currentPage / totalPages : 0.0;
-          });
-        });
+        // --- 修改convertPdf调用，传递高级选项 ---
+        final result = await _mineruService.convertPdf(
+          file, 
+          ConversionType.markdown, // 注意：这里仍然是markdown，但后台会根据_outputFormat处理
+          (currentPage, totalPages) {
+            setState(() {
+              _fileProgress[file.path] = totalPages > 0 ? currentPage / totalPages : 0.0;
+            });
+          },
+          extractImages: _extractImages,
+          preserveLayout: _preserveLayout,
+          outputFormat: _outputFormat,
+          detectLanguage: _detectLanguage,
+          supportTables: _supportTables
+        );
+        // --- 结束修改 ---
+        
         final fileName = path.basenameWithoutExtension(file.path);
-        final outputFile = File(path.join(_selectedOutputDir!, '$fileName.md'));
+        // --- 修改输出文件扩展名 ---
+        final outputFile = File(path.join(_selectedOutputDir!, '$fileName.$_outputFormat'));
+        // --- 结束修改 ---
         await _mineruService.saveConversionResult(result, outputFile.path);
         setState(() {
           _fileStatus[file.path] = '转换完成';
@@ -926,6 +1001,7 @@ class _PdfConverterPageState extends State<PdfConverterPage> {
               ),
             ),
             _buildBatchFileList(),
+            _buildAdvancedOptions(), // <-- 在文件列表下方添加高级选项
             if (_errorMessage != null)
               Container(
                 margin: const EdgeInsets.all(8.0),

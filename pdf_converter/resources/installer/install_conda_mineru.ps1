@@ -163,9 +163,9 @@ function Install-MineruDependencies {
                      "click>=8.1.7 fast-langdetect>=0.2.3,<0.3.0 loguru>=0.6.0 numpy>=1.21.6 " + 
                      "pydantic>=2.7.2,<2.11 PyMuPDF>=1.24.9,<1.25.0 scikit-learn>=1.0.2 " + 
                      "torch>=2.2.2 torchvision transformers>=4.49.0,!=4.51.0,<5.0.0 " + 
-                     "pdfminer.six==20231228 tqdm>=4.67.1"
+                     "pdfminer.six==20231228 tqdm>=4.67.1 && pip install mineru"
                      
-        Write-ColorMessage "正在安装PDF解析所需的高级依赖..." -ForegroundColor Yellow
+        Write-ColorMessage "正在安装PDF解析所需的高级依赖及MinerU核心包..." -ForegroundColor Yellow
         $result = Start-Process cmd.exe -ArgumentList "/c $installCmd" -Wait -PassThru -NoNewWindow
         
         if ($result.ExitCode -eq 0) {

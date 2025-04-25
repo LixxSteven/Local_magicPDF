@@ -74,11 +74,24 @@ class MineruService {
   }
 
   /// 将PDF文件转换为指定格式 (目前仅支持Markdown)
-  Future<String> convertPdf(File pdfFile, ConversionType type, Function(int, int) onProgress) async {
-    // 检查是否为支持的类型
-    if (type != ConversionType.markdown) {
-      throw Exception('当前仅支持转换为Markdown格式');
+  Future<String> convertPdf(
+    File pdfFile, 
+    ConversionType type, // 这个参数现在主要用于函数签名兼容，实际格式由outputFormat决定
+    Function(int, int) onProgress, 
+    {
+      // --- 新增高级选项参数 ---
+      bool extractImages = true,
+      bool preserveLayout = true,
+      String outputFormat = 'markdown',
+      bool detectLanguage = true,
+      bool supportTables = true,
+      // --- 结束新增 ---
     }
+  ) async {
+    // 检查是否为支持的类型 (根据 outputFormat 检查可能更合适，但为保持兼容性暂时保留)
+    // if (type != ConversionType.markdown) {
+    //   throw Exception('当前仅支持转换为Markdown格式');
+    // }
 
     // 估算转换时间 (根据文件大小和复杂度估计)
     final fileSize = await pdfFile.length();
@@ -119,8 +132,13 @@ class MineruService {
           filename: path.basename(pdfFile.path)
         ));
 
-        // 添加其他参数
-        request.fields['return_content_list'] = 'true'; // 尝试获取内容列表
+        // 添加其他参数 (包括高级选项)
+        request.fields['return_content_list'] = 'false'; // 一般情况下，直接获取完整结果
+        request.fields['extract_images'] = extractImages.toString();
+        request.fields['preserve_layout'] = preserveLayout.toString();
+        request.fields['output_format'] = outputFormat;
+        request.fields['detect_language'] = detectLanguage.toString();
+        request.fields['support_tables'] = supportTables.toString();
         
         // 更新进度为10%，表示文件已上传准备处理
         onProgress(10, 100);
@@ -154,14 +172,12 @@ class MineruService {
 
           // 根据API返回格式提取结果
           String result = "";
-          if (jsonData['content_list'] != null && jsonData['content_list'] is List) {
-            // 尝试将 content_list 拼接成 Markdown
+          if (jsonData['result'] != null) { // 优先使用 'result' 字段
+            result = jsonData['result'].toString();
+          } else if (jsonData['content_list'] != null && jsonData['content_list'] is List) {
             result = (jsonData['content_list'] as List).map((item) => item.toString()).join('\n\n');
-          } else if (jsonData['result'] != null) {
-            result = jsonData['result'].toString(); // 备用提取
           } else {
-            // 如果找不到特定字段，返回整个JSON字符串供调试
-            result = responseData; // 返回原始JSON字符串
+            result = responseData; // 返回原始JSON字符串以供调试
           }
           
           // 更新进度为100%，表示处理完成
